@@ -47,12 +47,12 @@ def __json_encode(val):
 
 def __nc_open(ds, *args, **kwargs):
 
-    tok = Path(ds).parts
+    tok = ds.split('.nc')
 
-    if len(tok) < 2:
-        return Dataset(tok[0], *args, **kwargs)
+    if not tok[1]:
+        return Dataset(tok[0] + '.nc', *args, **kwargs)
     else:
-        return Dataset(tok[0], *args, **kwargs)['/'.join(tok[1:])]
+        return Dataset(tok[0] + '.nc', *args, **kwargs)[tok[1]]
 
 
 # Return serielizable attributes as dicts
