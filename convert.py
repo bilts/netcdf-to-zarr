@@ -4,6 +4,8 @@ from netCDF4 import Dataset
 from itertools import chain
 from concurrent.futures import ProcessPoolExecutor
 
+# this version takes in account nested file structures
+
 # Convert NetCDF files to Zarr store
 
 
