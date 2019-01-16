@@ -179,6 +179,9 @@ def __append_vars_serial(ds, store, dim):
 
 def __set_vars_parallel(ds, store):
 
+    print("Setting variables for: " + ds)
+    dataset = __nc_open(ds)
+
     with ProcessPoolExecutor(max_workers=8) as executor:
         for name in dataset.variables.keys():
             executor.submit(__set_var, ds, store, name)
