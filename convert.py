@@ -1,7 +1,6 @@
 import numpy as np
 import zarr
 from netCDF4 import Dataset
-from pathlib import Path
 from itertools import chain
 from concurrent.futures import ProcessPoolExecutor
 
