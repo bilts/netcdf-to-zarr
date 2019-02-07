@@ -1,19 +1,38 @@
 import numpy as np
 import zarr
+
+
 from netCDF4 import Dataset
 from itertools import chain
 from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ThreadPoolExecutor
 
-# this version takes in account nested file structures
+
+# shared memory path
+SHARED = '/dev/shm/'
+
 
 # Convert NetCDF files to Zarr store
+# N.B. To use threads or processes
+# a thread safe and process safe version of hdf5 (underlying of netcdf4) is required.
+# this is because even if only concurrent reads on different data are issued,
+# the HDF5 library modifies global data structures that are independent
+# of a particular HDF5 dataset or HDF5 file.
+# HDF5 relies on a semaphore around the library API calls in the thread-safe version of the library
+# to protect the data structure from corruption by simultaneous manipulation from different threads.
 
 
-def netcdf_to_zarr(datasets, store, append_axis=None):
+def netcdf_to_zarr(src, dst, axis=None, mode='serial', nested=False):
 
-    root = zarr.group(store=store, overwrite=True)
+    if nested:
+        local_store = zarr.NestedDirectoryStore(dst)
+    else:
+        local_store = zarr.DirectoryStore(dst)
 
-    for i, dname in enumerate(datasets):
+    root = zarr.group(store=local_store, overwrite=True)
+
+    for i, dname in enumerate(src):
+        # cycling over groups, the first one is the root.
         for j, gname in enumerate(__get_groups(dname)):
             if j == 0:
                 group = root
@@ -23,9 +42,9 @@ def netcdf_to_zarr(datasets, store, append_axis=None):
                 ds = dname
             if i == 0:
                 __set_meta(ds + gname, group)
-                __set_vars_serial(ds + gname, group)
+                __set_vars(ds + gname, group, mode)
             else:
-                __append_vars_serial(gname, group, append_axis)
+                __append_vars(gname, group, axis, mode)
 
 
 # Convert non-json-encodable types to built-in types
@@ -120,11 +139,13 @@ def __set_meta(ds, store):
 # Set variable data, including dimensions and metadata
 
 
-def __set_var(ds, store, name):
+# serial access
+def __set_var_s(ds, store, name):
 
     print("Setting variable " + name)
     dataset = __nc_open(ds)
     var = dataset.variables[name]
+
     store.create_dataset(name,
                          data=var,
                          shape=var.shape,
@@ -136,65 +157,200 @@ def __set_var(ds, store, name):
     store[name].attrs.put(attrs)
 
 
+# process access
+def __set_var_p(ds, store, name):
+
+    print("Setting variable " + name)
+
+    dataset = __nc_open(ds)
+    var = dataset.variables[name]
+    syncro = zarr.ProcessSynchronizer(SHARED + 'ntz.sync')
+
+    store.create_dataset(name,
+                         data=var,
+                         shape=var.shape,
+                         chunks=(__get_var_chunks(var)),
+                         dtype=var.dtype,
+                         synchronizer=syncro
+                         )
+    attrs = __dsattrs(var)
+    attrs['dimensions'] = list(var.dimensions)
+    store[name].attrs.put(attrs)
+
+
+# thread access
+def __set_var_t(ds, store, name):
+
+    print("Setting variable " + name)
+
+    dataset = __nc_open(ds)
+    var = dataset.variables[name]
+    syncro = zarr.ThreadSynchronizer()
+
+    store.create_dataset(name,
+                         data=var,
+                         shape=var.shape,
+                         chunks=(__get_var_chunks(var)),
+                         dtype=var.dtype,
+                         synchronizer=syncro
+                         )
+    attrs = __dsattrs(var)
+    attrs['dimensions'] = list(var.dimensions)
+    store[name].attrs.put(attrs)
+
+
 # Append data to existing variable
 
-
-def __append_var(ds, store, name, dim):
+# serial access
+def __append_var_s(ds, store, name, dim):
     print("Appending " + name + " from " + ds)
     dataset = __nc_open(ds)
     var = dataset.variables[name]
-    print('dim: ' + dim, 'vdim: ' + var.dimensions)
+
     if dim in var.dimensions:
-        axis = group[name].attrs['dimensions'].index(dim)
+        axis = store[name].attrs['dimensions'].index(dim)
         store[name].append(var, axis)
 
 
-# NOTE: zarr parallel writes fails  on High Sierra 10.13.6
+# process access
+def __append_var_p(ds, store, name, dim):
+    print("Appending " + name + " from " + ds)
+    dataset = __nc_open(ds)
+    var = dataset.variables[name]
+    syncro = zarr.ProcessSynchronizer(SHARED + 'ntz.sync')
+
+    if dim in var.dimensions:
+        axis = store[name].attrs['dimensions'].index(dim)
+        array = zarr.open_array(store=store[name],
+                                mode='r+',
+                                synchronizer=syncro)
+        array.append(var, axis)
 
 
-# serial execution
+# thread access
+def __append_var_t(ds, store, name, dim):
+    print("Appending " + name + " from " + ds)
+    dataset = __nc_open(ds)
+    var = dataset.variables[name]
+    syncro = zarr.ThreadSynchronizer()
+
+    if dim in var.dimensions:
+        axis = store[name].attrs['dimensions'].index(dim)
+        array = zarr.open_array(store=store[name],
+                                mode='r+',
+                                synchronizer=syncro)
+        array.append(var, axis)
 
 
-def __set_vars_serial(ds, store):
+# setting executor
+def __set_vars(ds, store, mode='serial'):
 
     print("Setting variables for: " + ds)
     dataset = __nc_open(ds)
 
-    for name in dataset.variables.keys():
-        __set_var(ds, store, name)
+    if mode == 'serial':
+        for name in dataset.variables.keys():
+            __set_var_s(ds, store, name)
+    elif mode == 'threads':
+        with ProcessPoolExecutor(max_workers=8) as executor:
+            for name in dataset.variables.keys():
+                executor.submit(__set_var_t, ds, store, name)
+    elif mode == 'processes':
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            for name in dataset.variables.keys():
+                executor.submit(__set_var_p, ds, store, name)
+    else:
+        raise ValueError('the mode %s is not valid.' % mode)
 
 
-def __append_vars_serial(ds, store, dim):
+# appending executor
+def __append_vars(ds, store, dim, mode='serial'):
 
     print("Append vars")
     dataset = __nc_open(ds)
 
     store[dim].append(dataset[dim])
 
-    for name in dataset.variables.keys():
-        __append_var(ds, store, name, dim)
-
-
-# parallel execution
-
-
-def __set_vars_parallel(ds, store):
-
-    print("Setting variables for: " + ds)
-    dataset = __nc_open(ds)
-
-    with ProcessPoolExecutor(max_workers=8) as executor:
+    if mode == 'serial':
         for name in dataset.variables.keys():
-            executor.submit(__set_var, ds, store, name)
+            __append_var_s(ds, store, name, dim)
+    elif mode == 'threads':
+        with ProcessPoolExecutor(max_workers=8) as executor:
+            for name in dataset.variables.keys():
+                executor.submit(__append_var_t, ds, store, name, dim)
+    elif mode == 'processes':
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            for name in dataset.variables.keys():
+                executor.submit(__append_var_p, ds, store, name, dim)
+    else:
+        raise ValueError('the mode %s is not valid.' % mode)
 
 
-def __append_vars_parallel(ds, store, dim):
+def __configure(args):
 
-    print("Append vars")
-    dataset = __nc_open(ds)
+    import argparse
 
-    store[dim].append(dataset[dim])
+    class toList(argparse.Action):
+        def __init__(self, option_strings, dest, nargs=None, **kwargs):
+            if nargs is not None:
+                raise ValueError("nargs not allowed")
+            super(toList, self).__init__(option_strings, dest, **kwargs)
 
-    with ProcessPoolExecutor(max_workers=8) as executor:
-        for name in dataset.variables.keys():
-            executor.submit(__append_var, ds, store, name, dim)
+        def __call__(self, parser, namespace, values, option_string=None):
+            setattr(namespace, self.dest, values.split(' '))
+
+    parser = argparse.ArgumentParser(description=('This script converts netCDF4 into zarr files\n'
+                                                  'It is possible to specify a list of netCDF4 files\n'
+                                                  'to merge them into a single zarr file.\n'
+                                                  'to do so, the variables in the netCD4 file\n'
+                                                  'must have a common shape and run along the same dimension.\n'
+                                                  '\nExamples:\n'
+                                                  '  -convert.py src.nc dst.nc [-options]\n'
+                                                  '  -convert.py "src1.nc src2.nc src3.nc" dst.zarr [-options]\n'),
+                                     formatter_class=argparse.RawTextHelpFormatter)
+
+    parser.add_argument('src',
+                        help='source netCDF4 file/files',
+                        action=toList,
+                        default=[])
+
+    parser.add_argument('dst',
+                        help='target zarr file',
+                        default='')
+
+    parser.add_argument('-a',
+                        '--axis',
+                        metavar='axis',
+                        help='axis name to append along',
+                        default=None)
+
+    parser.add_argument('-n',
+                        '--nested',
+                        help='chunks are located into a nested path',
+                        action='store_true',
+                        default=False)
+
+    parser.add_argument('-m',
+                        '--mode',
+                        metavar='mode',
+                        help='transfer size for multipart',
+                        choices=('threads', 'processes'),
+                        default='serial')
+
+    return parser.parse_args(args)
+
+
+def main(args):
+    args = __configure(args)
+    netcdf_to_zarr(**vars(args))
+
+
+if __name__ == '__main__':
+
+    '''
+    Usage:
+    python convert.py 'src1.nc src2.nc...srcN.nc' dst.zarr [-options]
+    '''
+
+    import sys
+    main(sys.argv[1:])
