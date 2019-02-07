@@ -24,10 +24,13 @@ SHARED = '/dev/shm/'
 
 def netcdf_to_zarr(src, dst, axis=None, mode='serial', nested=False):
 
-    if nested:
-        local_store = zarr.NestedDirectoryStore(dst)
+    if isinstance(dst, str):
+        if nested:
+            local_store = zarr.NestedDirectoryStore(dst)
+        else:
+            local_store = zarr.DirectoryStore(dst)
     else:
-        local_store = zarr.DirectoryStore(dst)
+        local_store = dst
 
     root = zarr.group(store=local_store, overwrite=True)
 
