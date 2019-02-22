@@ -1,7 +1,6 @@
-import numpy as np
 import zarr
 
-
+from utils.encoder import json_encode
 from netCDF4 import Dataset
 from itertools import chain
 from concurrent.futures import ProcessPoolExecutor
@@ -61,21 +60,6 @@ def netcdf_to_zarr(src, dst, axis=None, mode='serial', nested=False):
                 __append_vars(gname, group, axis, mode)
 
 
-# Convert non-json-encodable types to built-in types
-
-
-def __json_encode(val):
-
-    if isinstance(val, np.integer):
-        return int(val)
-    elif isinstance(val, np.floating):
-        return float(val)
-    elif isinstance(val, np.ndarray):
-        return val.tolist()
-    else:
-        return val
-
-
 # Open netcdf files and groups with the same interface
 
 
@@ -92,16 +76,16 @@ def __nc_open(ds, *args, **kwargs):
 # Return serielizable attributes as dicts
 
 
-def __dsattrs(dataset):
+def __get_meta(dataset):
 
     # JSON encode attributes so they can be serialized
-    return {key: __json_encode(getattr(dataset, key)) for key in dataset.ncattrs()}
+    return {key: json_encode(getattr(dataset, key)) for key in dataset.ncattrs()}
 
 
 # Return chunking informations about the given variable
 
 
-def __get_var_chunks(var):
+def __get_chunks(var):
 
     if var.chunking() != 'contiguous':
         return tuple(var.chunking())
@@ -147,116 +131,53 @@ def __set_group(ds, store):
 def __set_meta(ds, store):
 
     print("Setting meta for: " + ds)
-    store.attrs.put(__dsattrs(__nc_open(ds)))
+    store.attrs.put(__get_meta(__nc_open(ds)))
 
 
 # Set variable data, including dimensions and metadata
 
 
-# serial access
-def __set_var_s(ds, store, name):
+def __set_var(ds, store, name, syncro=None):
 
     print("Setting variable " + name)
+
     dataset = __nc_open(ds)
     var = dataset.variables[name]
 
     store.create_dataset(name,
                          data=var,
                          shape=var.shape,
-                         chunks=(__get_var_chunks(var)),
-                         dtype=var.dtype
-                         )
-    attrs = __dsattrs(var)
-    attrs['dimensions'] = list(var.dimensions)
-    store[name].attrs.put(attrs)
-
-
-# process access
-def __set_var_p(ds, store, name):
-
-    print("Setting variable " + name)
-
-    dataset = __nc_open(ds)
-    var = dataset.variables[name]
-    syncro = zarr.ProcessSynchronizer(SHARED + 'ntz.sync')
-
-    store.create_dataset(name,
-                         data=var,
-                         shape=var.shape,
-                         chunks=(__get_var_chunks(var)),
+                         chunks=(__get_chunks(var)),
                          dtype=var.dtype,
                          synchronizer=syncro
                          )
-    attrs = __dsattrs(var)
-    attrs['dimensions'] = list(var.dimensions)
-    store[name].attrs.put(attrs)
-
-
-# thread access
-def __set_var_t(ds, store, name):
-
-    print("Setting variable " + name)
-
-    dataset = __nc_open(ds)
-    var = dataset.variables[name]
-    syncro = zarr.ThreadSynchronizer()
-
-    store.create_dataset(name,
-                         data=var,
-                         shape=var.shape,
-                         chunks=(__get_var_chunks(var)),
-                         dtype=var.dtype,
-                         synchronizer=syncro
-                         )
-    attrs = __dsattrs(var)
+    attrs = __get_chunks(var)
     attrs['dimensions'] = list(var.dimensions)
     store[name].attrs.put(attrs)
 
 
 # Append data to existing variable
 
-# serial access
-def __append_var_s(ds, store, name, dim):
+
+def __append_var(ds, store, name, dim, syncro=None):
+
     print("Appending " + name + " from " + ds)
+
     dataset = __nc_open(ds)
     var = dataset.variables[name]
-
-    if dim in var.dimensions:
-        axis = store[name].attrs['dimensions'].index(dim)
-        store[name].append(var, axis)
-
-
-# process access
-def __append_var_p(ds, store, name, dim):
-    print("Appending " + name + " from " + ds)
-    dataset = __nc_open(ds)
-    var = dataset.variables[name]
-    syncro = zarr.ProcessSynchronizer(SHARED + 'ntz.sync')
 
     if dim in var.dimensions:
         axis = store[name].attrs['dimensions'].index(dim)
         array = zarr.open_array(store=store[name],
                                 mode='r+',
-                                synchronizer=syncro)
-        array.append(var, axis)
-
-
-# thread access
-def __append_var_t(ds, store, name, dim):
-    print("Appending " + name + " from " + ds)
-    dataset = __nc_open(ds)
-    var = dataset.variables[name]
-    syncro = zarr.ThreadSynchronizer()
-
-    if dim in var.dimensions:
-        axis = store[name].attrs['dimensions'].index(dim)
-        array = zarr.open_array(store=store[name],
-                                mode='r+',
-                                synchronizer=syncro)
+                                synchronizer=syncro
+                                )
         array.append(var, axis)
 
 
 # setting executor
+
+
 def __set_vars(ds, store, mode='serial'):
 
     print("Setting variables for: " + ds)
@@ -264,20 +185,27 @@ def __set_vars(ds, store, mode='serial'):
 
     if mode == 'serial':
         for name in dataset.variables.keys():
-            __set_var_s(ds, store, name)
-    elif mode == 'threads':
-        with ProcessPoolExecutor(max_workers=8) as executor:
-            for name in dataset.variables.keys():
-                executor.submit(__set_var_p, ds, store, name)
+            __set_var(ds, store, name)
+
     elif mode == 'processes':
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ProcessPoolExecutor(max_workers=8) as executor:
+            syncro = zarr.ProcessSynchronizer(SHARED + 'ntz.sync')
             for name in dataset.variables.keys():
-                executor.submit(__set_var_t, ds, store, name)
+                executor.submit(__set_var, ds, store, name, syncro)
+
+    elif mode == 'threads':
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            syncro = zarr.ThreadSynchronizer()
+            for name in dataset.variables.keys():
+                executor.submit(__set_var, ds, store, name, syncro)
+
     else:
         raise ValueError('the mode %s is not valid.' % mode)
 
 
 # appending executor
+
+
 def __append_vars(ds, store, dim, mode='serial'):
 
     print("Append vars")
@@ -287,77 +215,30 @@ def __append_vars(ds, store, dim, mode='serial'):
 
     if mode == 'serial':
         for name in dataset.variables.keys():
-            __append_var_s(ds, store, name, dim)
-    elif mode == 'threads':
-        with ProcessPoolExecutor(max_workers=8) as executor:
-            for name in dataset.variables.keys():
-                executor.submit(__append_var_t, ds, store, name, dim)
+            __append_var(ds, store, name, dim)
+
     elif mode == 'processes':
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        with ProcessPoolExecutor(max_workers=8) as executor:
+            syncro = zarr.ProcessSynchronizer(SHARED + 'ntz.sync')
             for name in dataset.variables.keys():
-                executor.submit(__append_var_p, ds, store, name, dim)
+                executor.submit(__append_var, ds, store, name, dim, syncro)
+
+    elif mode == 'threads':
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            syncro = zarr.ThreadSynchronizer()
+            for name in dataset.variables.keys():
+                executor.submit(__append_var, ds, store, name, dim, syncro)
+
     else:
         raise ValueError('the mode %s is not valid.' % mode)
 
 
-def __configure(args):
-
-    import argparse
-
-    class toList(argparse.Action):
-        def __init__(self, option_strings, dest, nargs=None, **kwargs):
-            if nargs is not None:
-                raise ValueError("nargs not allowed")
-            super(toList, self).__init__(option_strings, dest, **kwargs)
-
-        def __call__(self, parser, namespace, values, option_string=None):
-            setattr(namespace, self.dest, values.split(' '))
-
-    desc = ('This script converts netCDF4 into zarr files\n'
-            'It is possible to specify a list of netCDF4 files\n'
-            'to merge them into a single zarr file.\n'
-            'to do so, the variables in the netCD4 file\n'
-            'must have a common shape and run along the same dimension.\n'
-            '\nExamples:\n'
-            '  -convert.py src.nc dst.nc [-options]\n'
-            '  -convert.py "src1.nc src2.nc src3.nc" dst.zarr [-options]\n')
-
-    parser = argparse.ArgumentParser(description=desc,
-                                     formatter_class=argparse.RawTextHelpFormatter)
-
-    parser.add_argument('src',
-                        help='source netCDF4 file/files',
-                        action=toList,
-                        default=[])
-
-    parser.add_argument('dst',
-                        help='target zarr file',
-                        default='')
-
-    parser.add_argument('-a',
-                        '--axis',
-                        metavar='axis',
-                        help='axis name to append along',
-                        default=None)
-
-    parser.add_argument('-n',
-                        '--nested',
-                        help='chunks are located into a nested path',
-                        action='store_true',
-                        default=False)
-
-    parser.add_argument('-m',
-                        '--mode',
-                        metavar='mode',
-                        help='use processes or threads',
-                        choices=('threads', 'processes'),
-                        default='serial')
-
-    return parser.parse_args(args)
+# main
 
 
 def main(args):
-    args = __configure(args)
+    import utils.parser as p
+    args = p.configure(args)
     netcdf_to_zarr(**vars(args))
 
 
