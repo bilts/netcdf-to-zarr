@@ -1,5 +1,5 @@
 import zarr
-
+import re
 from utils.encoder import json_encode
 from netCDF4 import Dataset
 from itertools import chain
@@ -64,8 +64,7 @@ def netcdf_to_zarr(src, dst, axis=None, mode='serial', nested=False):
 
 
 def __nc_open(ds, *args, **kwargs):
-
-    tok = ds.split('.nc')
+    tok = re.split(r'(?:.nc|.hdf5)', ds, maxsplit=1, flags=re.IGNORECASE)
 
     if not tok[1]:
         return Dataset(tok[0] + '.nc', *args, **kwargs)
@@ -151,7 +150,7 @@ def __set_var(ds, store, name, syncro=None):
                          dtype=var.dtype,
                          synchronizer=syncro
                          )
-    attrs = __get_chunks(var)
+    attrs = __get_meta(dataset)
     attrs['dimensions'] = list(var.dimensions)
     store[name].attrs.put(attrs)
 
