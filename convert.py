@@ -64,12 +64,13 @@ def netcdf_to_zarr(src, dst, axis=None, mode='serial', nested=False):
 
 
 def __nc_open(ds, *args, **kwargs):
-    tok = re.split(r'(?:.nc|.hdf5)', ds, maxsplit=1, flags=re.IGNORECASE)
+    base, ext, path = re.split(r'(\.nc|\.hdf5)', ds, maxsplit=1, flags=re.IGNORECASE)
 
-    if not tok[1]:
-        return Dataset(tok[0] + '.nc', *args, **kwargs)
+    filename = base + ext
+    if path == '':
+        return Dataset(filename, *args, **kwargs)
     else:
-        return Dataset(tok[0] + '.nc', *args, **kwargs)[tok[1]]
+        return Dataset(filename, *args, **kwargs)[path]
 
 
 # Return serielizable attributes as dicts
