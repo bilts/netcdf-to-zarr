@@ -58,6 +58,7 @@ def netcdf_to_zarr(src, dst, axis=None, mode='serial', nested=False):
                 __set_vars(ds + gname, group, mode)
             else:
                 __append_vars(gname, group, axis, mode)
+    zarr.convenience.consolidate_metadata(local_store, metadata_key='.zmetadata')
 
 
 # Open netcdf files and groups with the same interface
