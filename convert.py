@@ -152,7 +152,7 @@ def __set_var(ds, store, name, syncro=None):
                          synchronizer=syncro
                          )
     attrs = __get_meta(dataset)
-    attrs['dimensions'] = list(var.dimensions)
+    attrs['_ARRAY_DIMENSIONS'] = list(var.dimensions)
     store[name].attrs.put(attrs)
 
 
@@ -167,7 +167,7 @@ def __append_var(ds, store, name, dim, syncro=None):
     var = dataset.variables[name]
 
     if dim in var.dimensions:
-        axis = store[name].attrs['dimensions'].index(dim)
+        axis = store[name].attrs['_ARRAY_DIMENSIONS'].index(dim)
         array = zarr.open_array(store=store[name],
                                 mode='r+',
                                 synchronizer=syncro
@@ -228,6 +228,41 @@ def __append_vars(ds, store, dim, mode='serial'):
             syncro = zarr.ThreadSynchronizer()
             for name in dataset.variables.keys():
                 executor.submit(__append_var, ds, store, name, dim, syncro)
+
+    else:
+        raise ValueError('the mode %s is not valid.' % mode)
+
+def __set_dim(ds, group, name):
+    print("Set dim")
+    dataset = Dataset(ds)
+    dim = dataset.dimensions[name]
+    group.create_dataset(name, \
+        data=np.arange(dim.size), \
+        shape=(dim.size,), \
+        chunks=(1<<16,) if dim.isunlimited() else (dim.size,), \
+        dtype=np.int32 \
+    )
+    # Set dimension attrs
+    group[name].attrs['_ARRAY_DIMENSIONS'] = [name]
+
+# Set dimensions
+def __set_dims(ds, group, mode):
+    dataset = __nc_open(ds)
+    if mode == 'serial':
+        for name in dataset.variables.keys():
+            __set_dim(ds, group, name)
+
+    elif mode == 'processes':
+        with ProcessPoolExecutor(max_workers=8) as executor:
+            syncro = zarr.ProcessSynchronizer(SHARED + 'ntz.sync')
+            for name in dataset.variables.keys():
+                executor.submit(__set_dim, ds, group, name, syncro)
+
+    elif mode == 'threads':
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            syncro = zarr.ThreadSynchronizer()
+            for name in dataset.variables.keys():
+                executor.submit(__set_dim, ds, group, name, syncro)
 
     else:
         raise ValueError('the mode %s is not valid.' % mode)
