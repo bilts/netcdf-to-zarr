@@ -88,7 +88,7 @@ def __get_meta(dataset):
 
 def __get_chunks(var):
 
-    if var.chunking() != 'contiguous':
+    if var.chunking() != 'contiguous' and var.chunking() is not None:
         return tuple(var.chunking())
 
     return None
